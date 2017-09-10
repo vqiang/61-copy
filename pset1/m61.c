@@ -23,7 +23,7 @@ int addptr (void* ptr, size_t sz){
 
 int findptr (void* ptr){
     int i;
-    for (i=0; i<nactive; i++)
+    for (i = 0; i < nactive; i++)
 	if (activeptr[i] == ptr)
 		return i;
     return NULL;
