@@ -15,7 +15,7 @@ int nactive = 0;
 
 int addptr (void* ptr, size_t sz){
     if (nactive >= maxsize-1)
-	return -1;
+	return NULL;
     activeptr[nactive] = ptr;
     szptr[nactive] = sz;
     return ++nactive;
@@ -26,13 +26,13 @@ int findptr (void* ptr){
     for (i=0; i<nactive; i++)
 	if (activeptr[i] == ptr)
 		return i;
-    return -1;
+    return NULL;
 }
 
 int remptr (void* ptr){
     int i = findptr(ptr);
     if (i < 0)
-	return -1;
+	return NULL;
         nactive--;
     if (i!=nactive){
 	activeptr[i] = activeptr[nactive];
