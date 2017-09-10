@@ -6,6 +6,44 @@
 #include <inttypes.h>
 #include <assert.h>
 
+struct m61_statistics mstat = {0, 0, 0, 0, 0, 0, 0, 0};
+
+#define maxsize 100000
+void* activeptr[maxsize];
+size_t szptr[maxsize];
+int nactive = 0;
+
+int addptr (void* ptr, size_t sz){
+    if (nactive >= maxsize-1)
+	return -1;
+    activeptr[nactive] = ptr;
+    szptr[nactive] = sz;
+    return ++nactive;
+}
+
+int findptr (void* ptr){
+    int i;
+    for (i=0; i<nactive; i++)
+	if (activeptr[i] == ptr)
+		return i;
+    return -1;
+}
+
+int remptr (void* ptr){
+    int i = findptr(ptr);
+    if (i < 0)
+	return -1;
+        nactive--;
+    if (i!=nactive){
+	activeptr[i] = activeptr[nactive];
+	szptr[i] = szptr[nactive];
+    }
+    return i;
+}
+inline size_t tbl_sz_of_ptr (int idx) { return szptr[idx]; }
+
+// memset(mstat, 0, sizeof(mstat));
+
 /// m61_malloc(sz, file, line)
 ///    Return a pointer to `sz` bytes of newly-allocated dynamic memory.
 ///    The memory is not initialized. If `sz == 0`, then m61_malloc may
@@ -14,8 +52,27 @@
 
 void* m61_malloc(size_t sz, const char* file, int line) {
     (void) file, (void) line;   // avoid uninitialized variable warnings
-    // Your code here.
-    return base_malloc(sz);
+    void* p = base_malloc(sz);
+    if (p) {
+	mstat.nactive++;
+	mstat.active_size += sz;
+	mstat.ntotal++;
+	mstat.total_size = mstat.total_size + sz;
+        if (!mstat.heap_min || mstat.heap_min > p) {
+            mstat.heap_min = p;
+        }
+        if (!mstat.heap_max || mstat.heap_max < p + sz) {
+            mstat.heap_max = p + sz;
+        }
+	addptr (p, sz);
+    }
+    
+    else {
+	mstat.nfail++;
+	mstat.fail_size += sz;
+	return p;
+    }
+    return p;
 }
 
 
@@ -27,8 +84,14 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 
 void m61_free(void *ptr, const char *file, int line) {
     (void) file, (void) line;   // avoid uninitialized variable warnings
-    // Your code here.
-    base_free(ptr);
+    int i;
+    i = findptr(ptr);
+    if (ptr >= 0 && ptr) {
+	mstat.nactive--;
+	mstat.active_size -= szptr[i];
+	base_free(ptr);
+	remptr(ptr);
+    }
 }
 
 
@@ -75,9 +138,7 @@ void* m61_calloc(size_t nmemb, size_t sz, const char* file, int line) {
 ///    Store the current memory statistics in `*stats`.
 
 void m61_getstatistics(struct m61_statistics* stats) {
-    // Stub: set all statistics to enormous numbers
-    memset(stats, 255, sizeof(struct m61_statistics));
-    // Your code here.
+    *stats = mstat;
 }
 
 
