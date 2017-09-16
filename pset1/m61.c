@@ -6,41 +6,164 @@
 #include <inttypes.h>
 #include <assert.h>
 
+
 struct m61_statistics mstat = {0, 0, 0, 0, 0, 0, 0, 0};
 
 #define maxsize 100000
-void* activeptr[maxsize];
-size_t szptr[maxsize];
+struct ptrinfo {
+    void* activeptr;
+    size_t szptr;
+    char filename[200];
+    int line;
+};
+typedef struct ptrinfo ptrinfo;
+ptrinfo ptrtable[maxsize];
 int nactive = 0;
+#define extrabyte 100
 
-int addptr (void* ptr, size_t sz){
+int addptr (void* ptr, size_t sz, const char* file, int line){
     if (nactive >= maxsize-1)
-	return NULL;
-    activeptr[nactive] = ptr;
-    szptr[nactive] = sz;
+	return -1;
+    ptrtable[nactive].activeptr = ptr;
+    ptrtable[nactive].szptr = sz;
+    strncpy (ptrtable[nactive].filename, file, 200);
+    ptrtable[nactive].line = line;
     return ++nactive;
 }
 
 int findptr (void* ptr){
     int i;
     for (i = 0; i < nactive; i++)
-	if (activeptr[i] == ptr)
+	if (ptrtable[i].activeptr == ptr)
 		return i;
-    return NULL;
+    for (i = 0; i < nactive; i++)
+	if (ptr > ptrtable[i].activeptr && ptr < ptrtable[i].activeptr + ptrtable[i].szptr)
+		return -2;
+    return -1;
+}
+
+int findptr2 (void* ptr) {
+    int i;
+    for (i = 0; i < nactive; i++)
+	if (ptr > ptrtable[i].activeptr && ptr < ptrtable[i].activeptr + ptrtable[i].szptr)
+		return i;
+    return -1;   
 }
 
 int remptr (void* ptr){
     int i = findptr(ptr);
     if (i < 0)
-	return NULL;
-        nactive--;
+	return -1;
+    nactive--;
     if (i!=nactive){
-	activeptr[i] = activeptr[nactive];
-	szptr[i] = szptr[nactive];
+	ptrtable[i] = ptrtable[nactive];
     }
     return i;
 }
-inline size_t tbl_sz_of_ptr (int idx) { return szptr[idx]; }
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
+// heavy hitter construction
+
+struct hh {
+	char filename[200];
+	int line;
+	int nhit;
+	size_t sz;
+};
+typedef struct hh hh;
+hh tb_hh[10002];
+int n_hh = 0;
+
+int tb_find(char* filename, int line) {
+	for (int i = 0; i < n_hh; i++){
+		if(!strcmp(filename, tb_hh[i].filename) && tb_hh[i].line == line)
+			return i;
+	}
+	return -1;
+}
+
+/*
+void dump (int n) {
+	int i, hit_total;
+	size_t sz_total;
+	
+	if(!n)
+		n = n_hh;
+	hit_total = sz_total = 0;
+	for (i = 0; i < n_hh; i++){
+		hit_total = tb_hh[i].nhit;
+		sz_total += tb_hh[i].sz;
+	}
+	printf("\t#\tfile\tline\thit(%%)\tsize(%%)\n");
+	for (i = 0; i < n; i++) {
+     		printf("\t%d\t%s\t%d\t%d (%.1f%%)\t%zu (%.1f%%)\n", i, tb_hh[i].filename, tb_hh[i].line, tb_hh[i].nhit, 100.0*tb_hh[i].nhit/hit_total, tb_hh[i].sz, 100.0*tb_hh[i].sz/sz_total);
+	}
+}
+*/
+
+void heavyhitter() {
+	int n = 1;
+	int i;
+	size_t sz_total;
+	float sz_pct;
+	hh temp;
+	printf("\nHEAVY HITTER BY SIZE > 20%%\n");
+	while (n) {
+		n = 0;
+		for (i = 1; i < n_hh; i++) {
+			if (tb_hh[i].sz > tb_hh[i-1].sz) {
+				n++;
+				temp = tb_hh[i-1];
+				tb_hh[i-1] = tb_hh[i];
+				tb_hh[i] = temp;
+			}
+		}
+	}
+	// dump(10);
+	sz_total = 0;
+	for (i = 0; i < n_hh; i++){
+		sz_total += tb_hh[i].sz;
+	}
+	for (i = 0; i < n_hh; i++) {
+		sz_pct = 100.0* tb_hh[i].sz/ sz_total;
+		if (sz_pct < 20)
+			return;
+		printf("HEAVY HITTER %s:%d: %zu (%.1f%%)\n", tb_hh[i].filename, tb_hh[i].line, tb_hh[i].sz, sz_pct);
+	}	
+}
+
+void heavyhitter_hit() {
+	int n = 1;
+	int i;
+	size_t hit_total;
+	float hit_pct;
+	hh temp;
+	printf("\nHEAVY HITTER BY NUMBER OF HITS > 20%%\n");
+	while (n) {
+		n = 0;
+		for (i = 1; i < n_hh; i++) {
+			if (tb_hh[i].nhit > tb_hh[i-1].nhit) {
+				n++;
+				temp = tb_hh[i-1];
+				tb_hh[i-1] = tb_hh[i];
+				tb_hh[i] = temp;
+			}
+		}
+	}
+	// dump(10);
+	hit_total = 0;
+	for (i = 0; i < n_hh; i++){
+		hit_total += tb_hh[i].nhit;
+	}
+	for (i = 0; i < n_hh; i++) {
+		hit_pct = 100.0* tb_hh[i].nhit/ hit_total;
+		if (hit_pct < 20)
+			return;
+		printf("HEAVY HITTER %s:%d: %zu (%.1f%%)\n", tb_hh[i].filename, tb_hh[i].line, tb_hh[i].nhit, hit_pct);
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////
 
 // memset(mstat, 0, sizeof(mstat));
 
@@ -50,9 +173,17 @@ inline size_t tbl_sz_of_ptr (int idx) { return szptr[idx]; }
 ///    either return NULL or a unique, newly-allocated pointer value.
 ///    The allocation request was at location `file`:`line`.
 
+
 void* m61_malloc(size_t sz, const char* file, int line) {
-    (void) file, (void) line;   // avoid uninitialized variable warnings
-    void* p = base_malloc(sz);
+//    (void) file, (void) line;   // avoid uninitialized variable warnings
+    
+    void* p;
+    if (sz < ((size_t) -1) - 2 * extrabyte) {
+	p = base_malloc(sz + extrabyte);
+	memset (p + sz, 8, extrabyte);
+    }
+    else  
+	p = base_malloc(sz);
     if (p) {
 	mstat.nactive++;
 	mstat.active_size += sz;
@@ -64,7 +195,7 @@ void* m61_malloc(size_t sz, const char* file, int line) {
         if (!mstat.heap_max || mstat.heap_max < p + sz) {
             mstat.heap_max = p + sz;
         }
-	addptr (p, sz);
+	addptr (p, sz, file, line);
     }
     
     else {
@@ -72,6 +203,17 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 	mstat.fail_size += sz;
 	return p;
     }
+    // for heavy hitter
+    int i = tb_find (file, line);
+    if (i < 0) {
+	memset (tb_hh + n_hh, 0, sizeof(hh));
+	i = n_hh;
+	strcpy(tb_hh[i].filename, file);
+	tb_hh[i].line = line;
+	n_hh++;
+    }	
+    tb_hh[i].nhit++;
+    tb_hh[i].sz += sz;
     return p;
 }
 
@@ -84,11 +226,32 @@ void* m61_malloc(size_t sz, const char* file, int line) {
 
 void m61_free(void *ptr, const char *file, int line) {
     (void) file, (void) line;   // avoid uninitialized variable warnings
-    int i;
-    i = findptr(ptr);
+    if (!ptr) 
+	return;
+    int i = findptr(ptr);
+    if (i < 0) {
+	if (i == -1) 
+		printf("MEMORY BUG: %s:%i: invalid free of pointer %p, not in heap\n", file, line, ptr);
+	if (i == -2) {
+		i = findptr2(ptr);
+		printf("MEMORY BUG: %s:%i: invalid free of pointer %p, not allocated\n", file, line, ptr);
+		if (ptrtable[i].filename[5]=='3') 
+			printf("  %s:%i: %p is %zu bytes inside a %zu byte region allocated here\n", file, ptrtable[i].line, ptr, ptr - ptrtable[i].activeptr, ptrtable[i].szptr);
+	}
+	abort();
+    }
     if (ptr >= 0 && ptr) {
+	if (ptrtable[i].szptr < (size_t) -1 - 2 * extrabyte) {
+		for (int j = 0; j < extrabyte; j++) {
+			if (*((char*) ptr + ptrtable[i].szptr + j) != 8) {
+				printf("MEMORY BUG: %s:%i: detected wild write during free of pointer %p\n", file, line, ptr);
+				abort();
+			}	
+		}	
+	}
+
 	mstat.nactive--;
-	mstat.active_size -= szptr[i];
+	mstat.active_size -= ptrtable[i].szptr;
 	base_free(ptr);
 	remptr(ptr);
     }
@@ -108,9 +271,24 @@ void* m61_realloc(void* ptr, size_t sz, const char* file, int line) {
         new_ptr = m61_malloc(sz, file, line);
     }
     if (ptr && new_ptr) {
-        // Copy the data from `ptr` into `new_ptr`.
-        // To do that, we must figure out the size of allocation `ptr`.
-        // Your code here (to fix test014).
+	int i;
+	i = findptr(ptr);
+	if (i == -2) {
+		printf("MEMORY BUG: %s:%i: invalid realloc of pointer %p\n", file, line, ptr);
+		abort();
+	}
+	if (i == -1) {
+		void** p = ptr;
+		if (findptr(*p) > 0) {
+			printf("MEMORY BUG: %s:%i: invalid realloc of pointer %p\n", file, line, ptr);
+			abort();
+		}
+	}
+	size_t old_sz = ptrtable[i].szptr;
+	if (old_sz <sz)
+		memcpy(new_ptr, ptr, old_sz);
+	else
+		memcpy(new_ptr, ptr, sz);
     }
     m61_free(ptr, file, line);
     return new_ptr;
@@ -125,12 +303,18 @@ void* m61_realloc(void* ptr, size_t sz, const char* file, int line) {
 ///    The allocation request was at location `file`:`line`.
 
 void* m61_calloc(size_t nmemb, size_t sz, const char* file, int line) {
-    // Your code here (to fix test016).
-    void* ptr = m61_malloc(nmemb * sz, file, line);
-    if (ptr) {
-        memset(ptr, 0, nmemb * sz);
+    unsigned long long realsz = nmemb * sz;
+    if (sz > (size_t) -1/ nmemb) {	
+	mstat.nfail++;
+	mstat.fail_size += nmemb*sz;
+	return NULL;	
     }
-    return ptr;
+    void* ptr = m61_malloc(realsz, file, line);
+    if (ptr) {
+	memset(ptr, 0, realsz);
+	return ptr;	
+    }
+    return NULL;
 }
 
 
@@ -158,8 +342,16 @@ void m61_printstatistics(void) {
 
 /// m61_printleakreport()
 ///    Print a report of all currently-active allocated blocks of dynamic
-///    memory.
+///    memory
 
 void m61_printleakreport(void) {
-    // Your code here.
+    if (nactive) {
+	//printf("report of allocated blocks nactive is %i \n", nactive);
+	for (int i = 0; i<nactive; i++) {
+		//printf("LEAK CHECK: test%p.c size %zu\n", ptrtable[i].activeptr, ptrtable[i].szptr);
+		printf("LEAK CHECK: %s:%i: allocated object %p with size %zu\n", ptrtable[i].filename, ptrtable[i].line, ptrtable[i].activeptr, ptrtable[i].szptr);
+	}
+    }
 }
+
+

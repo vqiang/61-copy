@@ -65,4 +65,7 @@ void* base_malloc(size_t sz);
 void base_free(void* ptr);
 void base_malloc_disable(int is_disabled);
 
+void heavyhitter();
+void heavyhitter_hit();
+
 #endif

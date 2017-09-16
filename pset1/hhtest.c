@@ -134,4 +134,8 @@ int main(int argc, char **argv) {
 
         phase(skew, count);
     }
+    // heavy hitter
+    heavyhitter();
+    // extra credit
+    heavyhitter_hit();
 }

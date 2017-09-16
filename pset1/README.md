@@ -11,3 +11,4 @@ Grading notes (if any)
 
 Extra credit attempted (if any)
 -------------------------------
+Heavy hitter reports by number of hits, most frequent allocations reported first (over 20%)
