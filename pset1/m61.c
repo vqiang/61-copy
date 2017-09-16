@@ -21,6 +21,7 @@ ptrinfo ptrtable[maxsize];
 int nactive = 0;
 #define extrabyte 100
 
+// adds entry to ptrtable every time malloc is successful
 int addptr (void* ptr, size_t sz, const char* file, int line){
     if (nactive >= maxsize-1)
 	return -1;
@@ -31,6 +32,10 @@ int addptr (void* ptr, size_t sz, const char* file, int line){
     return ++nactive;
 }
 
+// searches ptrtable for the requested ptr
+// returns table index if found
+// 	   -2 if ptr within allocated range but doesn't match anything
+//         -1 if ptr not found at all
 int findptr (void* ptr){
     int i;
     for (i = 0; i < nactive; i++)
@@ -42,6 +47,8 @@ int findptr (void* ptr){
     return -1;
 }
 
+// searches ptrtable for requested ptr (variation on findptr)
+// returns table index if ptr is within previously allocated memory
 int findptr2 (void* ptr) {
     int i;
     for (i = 0; i < nactive; i++)
@@ -50,6 +57,7 @@ int findptr2 (void* ptr) {
     return -1;   
 }
 
+// removes entry from ptrtable, when free is called
 int remptr (void* ptr){
     int i = findptr(ptr);
     if (i < 0)
@@ -62,19 +70,19 @@ int remptr (void* ptr){
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
-// heavy hitter construction
+// heavy hitter 
 
 struct hh {
 	char filename[200];
 	int line;
-	int nhit;
+	size_t nhit;
 	size_t sz;
 };
 typedef struct hh hh;
 hh tb_hh[10002];
 int n_hh = 0;
 
-int tb_find(char* filename, int line) {
+int tb_find(const char* filename, int line) {
 	for (int i = 0; i < n_hh; i++){
 		if(!strcmp(filename, tb_hh[i].filename) && tb_hh[i].line == line)
 			return i;
@@ -101,6 +109,7 @@ void dump (int n) {
 }
 */
 
+// function that reports heavy hitter data, looks at size, only reports if larger than 20% total
 void heavyhitter() {
 	int n = 1;
 	int i;
@@ -108,6 +117,7 @@ void heavyhitter() {
 	float sz_pct;
 	hh temp;
 	printf("\nHEAVY HITTER BY SIZE > 20%%\n");
+	// bubble sort
 	while (n) {
 		n = 0;
 		for (i = 1; i < n_hh; i++) {
@@ -132,6 +142,7 @@ void heavyhitter() {
 	}	
 }
 
+// function that reports heavy hitter data, looks at number of hits, only reports if larger than 20% total
 void heavyhitter_hit() {
 	int n = 1;
 	int i;
@@ -139,6 +150,7 @@ void heavyhitter_hit() {
 	float hit_pct;
 	hh temp;
 	printf("\nHEAVY HITTER BY NUMBER OF HITS > 20%%\n");
+	// bubblesort
 	while (n) {
 		n = 0;
 		for (i = 1; i < n_hh; i++) {
@@ -177,7 +189,7 @@ void heavyhitter_hit() {
 void* m61_malloc(size_t sz, const char* file, int line) {
 //    (void) file, (void) line;   // avoid uninitialized variable warnings
     
-    void* p;
+    char* p;
     if (sz < ((size_t) -1) - 2 * extrabyte) {
 	p = base_malloc(sz + extrabyte);
 	memset (p + sz, 8, extrabyte);
