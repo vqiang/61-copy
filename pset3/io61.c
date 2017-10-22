@@ -31,10 +31,10 @@ static inline int find_block_ofs(off_t off) {
 }
 
 // defines slot size, assignment
-#define NSLOTS 0x40
+#define NSLOTS 0x100
 //#define NSLOTS 64
 static inline int find_slot(off_t off) { 
-    return find_block(off) & 0x03F; 
+    return find_block(off) & 0x0FF; 
     //return find_block(off) % NSLOTS;
 }
 
@@ -201,17 +201,35 @@ int io61_readc(io61_file* f) {
 
 ssize_t io61_read(io61_file* f, char* buf, size_t sz) {
     size_t nread;
-    for (nread = 0; nread != sz; ++nread) {
-        int ch = io61_readc(f);
-        if (ch == EOF)
-            break;
-        buf[nread] = ch;
-    }
-    if (nread != 0 || sz == 0 || io61_eof(f)) {
+    //printf ("%zd\n", sz);
+    if (f->seq_mode != 1) {
+	nread = read(f->fd, buf, sz);
+	//printf("loop1 \n");
         return nread;
-    } 
-    else {
-        return -1;
+    }
+    else if (sz > BLOCK_SIZE) {
+	if (f->seq_mode != 0) {
+	    int new_pos = lseek(f->fd, f->pos, SEEK_SET);
+            assert(new_pos != -1); 
+            f->f_pos = new_pos;
+	}
+	nread = read(f->fd, buf, sz);
+	f->f_pos += nread;
+	//printf("loop2\n");
+	return nread;
+    } else {
+        for (nread = 0; nread != sz; ++nread) {
+            int ch = io61_readc(f);
+            if (ch == EOF)
+                break;
+            buf[nread] = ch;
+        }
+	//printf("loop3\n");
+        if (nread != 0 || sz == 0 || io61_eof(f)) {
+            return nread;
+        } 
+        else 
+            return -1;
     }
 /*
     size_t nread = 0;
@@ -296,24 +314,18 @@ int io61_writec(io61_file* f, int ch) {
 //    an error occurred before any characters were written.
 
 ssize_t io61_write(io61_file* f, const char* buf, size_t sz) {
-    /*
-    int nwritten = write(f->fd, buf, sz);
-    if (nwritten == -1) {
-        return -1;
-    }
-    else {
-        return nwritten;
-    } */
-    
-    if (!sz)
-        return 0;
-
     size_t nwritten;
-    for (nwritten = 0; nwritten != sz; ++nwritten)
-        if (io61_writec(f, buf[nwritten]) == -1) 
-            return -1;
-    
-    return nwritten;
+    if (f->seq_mode != 1) {
+    	nwritten = write(f->fd, buf, sz);
+    	return nwritten;
+    } else {
+        if (!sz)
+            return 0;
+        for (nwritten = 0; nwritten != sz; ++nwritten)
+            if (io61_writec(f, buf[nwritten]) == -1) 
+                return -1;
+        return nwritten;
+    }
 }
 
 // io61_flush(f)
