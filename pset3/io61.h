@@ -8,7 +8,6 @@
 #include <assert.h>
 
 typedef struct io61_file io61_file;
-
 io61_file* io61_fdopen(int fd, int mode);
 io61_file* io61_open_check(const char* filename, int mode);
 int io61_close(io61_file* f);
