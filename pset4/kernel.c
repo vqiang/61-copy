@@ -85,7 +85,11 @@ void kernel(const char* command) {
     pageinfo_init();
     console_clear();
     timer_init(HZ);
-
+    virtual_memory_map(kernel_pagetable, 0x00, 0x00, PROC_START_ADDR,
+        PTE_P|PTE_W, NULL);
+    virtual_memory_map(kernel_pagetable, 0xB8000, 0xB8000, PAGESIZE, 
+	PTE_P|PTE_W|PTE_U, NULL);
+    log_printf("test\n");
     // Set up process descriptors
     memset(processes, 0, sizeof(processes));
     for (pid_t i = 0; i < NPROC; i++) {
