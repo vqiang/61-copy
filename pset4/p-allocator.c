@@ -1,6 +1,6 @@
 #include "process.h"
 #include "lib.h"
-#define ALLOC_SLOWDOWN 100
+#define ALLOC_SLOWDOWN 20
 
 extern uint8_t end[];
 

@@ -89,7 +89,6 @@ void kernel(const char* command) {
         PTE_P|PTE_W, NULL);
     virtual_memory_map(kernel_pagetable, 0xB8000, 0xB8000, PAGESIZE, 
 	PTE_P|PTE_W|PTE_U, NULL);
-    log_printf("test\n");
     // Set up process descriptors
     memset(processes, 0, sizeof(processes));
     for (pid_t i = 0; i < NPROC; i++) {
@@ -111,6 +110,59 @@ void kernel(const char* command) {
     run(&processes[1]);
 }
 
+x86_64_pagetable* page_allocator() {
+    uintptr_t pa = 0x00*PAGESIZE;
+    size_t sz = KERNEL_START_ADDR - pa;
+    for (; sz!=0; pa+=PAGESIZE, sz-=PAGESIZE) {
+        if (pageinfo[PAGENUMBER(pa)].refcount==0) {
+	    int r = assign_physical_page(pa, current->p_pid);
+	    assert (r==0);
+	    memset((x86_64_pagetable*) pa, 0, PAGESIZE);
+	    return (x86_64_pagetable*) pa;
+	}
+    }
+    return 0;
+}
+
+x86_64_pagetable* copy_pagetable(x86_64_pagetable* pagetable, int8_t owner) {
+    log_printf("copy_pagetable(0x%08x, %d)\n", pagetable, owner);
+    x86_64_pagetable* new_pagetable = page_allocator();
+    assert(new_pagetable);
+    x86_64_pagetable* p;
+    uintptr_t va, pa;
+    size_t sz;
+    int r;
+    for (va = pa = 0, sz = PROC_START_ADDR; sz!=0; va+=PAGESIZE, pa+= PAGESIZE, sz-= PAGESIZE) {
+	vamapping v = virtual_memory_lookup(pagetable, va);
+	if (v.pn != -1){
+	    r = virtual_memory_map (new_pagetable, va, v.pa, PAGESIZE, v.perm, page_allocator);
+	    assert(r == 0);
+	}
+    }
+    return new_pagetable;
+}
+
+// log_pagetable()
+//    dump pagetable structure to log file
+
+void log_pagetable(char* st, x86_64_pagetable* p, int level) {
+    if (level==1)
+        log_printf("== log_pagetable() %s [0x%08x]\n", st, p);
+
+    assert(p);
+    x86_64_pagetable* p1;
+    int i;
+    char indent[10] = "\t\t\t\t\t\t\t\t";
+    indent[level]=0;
+    for (i=0; i<NPAGETABLEENTRIES; i++) {
+        p1 = (x86_64_pagetable*) PTE_ADDR(p->entry[i]);
+        if (p1) {
+            log_printf("%s[%d] [0x%08x]\n", indent, i, p1);
+            if (level<3)
+                log_pagetable("", p1, level+1);
+        }
+    }    
+}
 
 // process_setup(pid, program_number)
 //    Load application program `program_number` as process number `pid`.
@@ -118,9 +170,15 @@ void kernel(const char* command) {
 //    %rip and %rsp, gives it a stack page, and marks it as runnable.
 
 void process_setup(pid_t pid, int program_number) {
+    log_printf("process_setup(pid=%d, program_number=%d)\n", pid, program_number);
     process_init(&processes[pid], 0);
-    processes[pid].p_pagetable = kernel_pagetable;
-    ++pageinfo[PAGENUMBER(kernel_pagetable)].refcount;
+    log_pagetable("kernel_pagetable", kernel_pagetable, 1);
+    current = &processes[pid];
+    x86_64_pagetable* process_pagetable = copy_pagetable(kernel_pagetable, pid);
+    processes[pid].p_pagetable = process_pagetable;
+    virtual_memory_map(process_pagetable, PROC_START_ADDR, PROC_START_ADDR, MEMSIZE_PHYSICAL - PROC_START_ADDR, PTE_P | PTE_W, 0);
+    log_pagetable("process_pagetable", process_pagetable, 1);
+    
     int r = program_load(&processes[pid], program_number, NULL);
     assert(r >= 0);
     processes[pid].p_registers.reg_rsp = PROC_START_ADDR + PROC_SIZE * pid;
