@@ -171,13 +171,20 @@ x86_64_pagetable* copy_pagetable(x86_64_pagetable* pagetable, int8_t owner) {
     if (pagetable != kernel_pagetable) {
         for (va = PROC_START_ADDR; va < MEMSIZE_VIRTUAL; va += PAGESIZE) {
             vamapping v = virtual_memory_lookup(pagetable, va);
-            if ((v.pn != -1) && (v.perm & PTE_P) && (v.perm & PTE_W) && (v.perm & PTE_U)) {
-                uintptr_t pa = (uintptr_t) page_allocator();
-                if (pa) {
-                    r = virtual_memory_map(new_pagetable, va, pa, PAGESIZE, v.perm, 0);
-                    assert(r == 0);
-                    memcpy((void *) pa, (void *) v.pa, PAGESIZE);
-                }
+            if ((v.pn != -1) && (v.perm & PTE_P) && (v.perm & PTE_U)) {
+		if (v.perm & PTE_W) {
+                    uintptr_t pa = (uintptr_t) page_allocator();
+                    if (pa) {
+                        r = virtual_memory_map(new_pagetable, va, pa, PAGESIZE, v.perm, 0);
+                        assert(r == 0);
+                        memcpy((void *) pa, (void *) v.pa, PAGESIZE);
+                    }
+		}
+		else {
+		    r = virtual_memory_map(new_pagetable, va, v.pa, PAGESIZE, v.perm, 0);
+		    assert(r == 0);
+		    pageinfo[PAGENUMBER(v.pa)].refcount++;
+		}
             }
         }
     }

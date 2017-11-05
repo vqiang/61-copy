@@ -100,6 +100,13 @@ static int program_load_segment(proc* p, const elf_program* ph,
     // copy data from executable image into process memory
     memcpy((uint8_t*) va, src, end_file - va);
     memset((uint8_t*) end_file, 0, end_mem - end_file);
+    
+    size_t sz = end_file - va;
+    if (sz % PAGESIZE != 0) {
+    	sz -= sz % PAGESIZE;
+	sz += PAGESIZE;
+    }
+    virtual_memory_map (p->p_pagetable, va, va, sz, PTE_P | PTE_U, 0);
 
     // restore kernel pagetable
     set_pagetable(kernel_pagetable);
