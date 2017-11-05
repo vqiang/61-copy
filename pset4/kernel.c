@@ -85,10 +85,13 @@ void kernel(const char* command) {
     pageinfo_init();
     console_clear();
     timer_init(HZ);
+
+    // protect the kernel
     virtual_memory_map(kernel_pagetable, 0x00, 0x00, PROC_START_ADDR,
         PTE_P|PTE_W, NULL);
     virtual_memory_map(kernel_pagetable, 0xB8000, 0xB8000, PAGESIZE, 
 	PTE_P|PTE_W|PTE_U, NULL);
+
     // Set up process descriptors
     memset(processes, 0, sizeof(processes));
     for (pid_t i = 0; i < NPROC; i++) {
@@ -110,6 +113,11 @@ void kernel(const char* command) {
     run(&processes[1]);
 }
 
+
+// find_free_pp()
+//    finds free physical pages
+//    returns 0 if can't find any
+//            address of the free pp
 uintptr_t find_free_pp () {
     uintptr_t pa = 0;
     size_t sz = MEMSIZE_PHYSICAL;
@@ -124,6 +132,9 @@ uintptr_t find_free_pp () {
 
 int8_t own = 0;
 
+// page_allocator()
+//    allocate another page
+//    if fails return 0
 x86_64_pagetable* page_allocator() {
     uintptr_t pa = find_free_pp();
     if (pa) {
@@ -135,8 +146,15 @@ x86_64_pagetable* page_allocator() {
     return 0;
 }
 
+void free_pa (uintptr_t pa);
+void free_pagetable(x86_64_pagetable* pagetable);
+
+// copy_pagetable(pagetable, owner)
+//    copies a pagetable
+//    returns pagetable address if successful
+//            NULL if fails
 x86_64_pagetable* copy_pagetable(x86_64_pagetable* pagetable, int8_t owner) {
-    log_printf("copy_pagetable(0x%08x, %d)\n", pagetable, owner);
+    //log_printf("copy_pagetable(0x%08x, %d)\n", pagetable, owner);
     uintptr_t va;
     size_t sz;
     int r;
@@ -146,7 +164,14 @@ x86_64_pagetable* copy_pagetable(x86_64_pagetable* pagetable, int8_t owner) {
     x86_64_pagetable* pt[6];
     for (int i=0; i<6; i++) {
         pt[i] = page_allocator();
-        assert(pt[i]);
+        if (pt[i] == 0){
+	    while (i != 0) {
+		i--;
+		free_pa ((uintptr_t) pt[i]);
+	    }
+	    own = 0;
+	    return 0;
+	}
     }
     pt[0]->entry[0] = PTE_ADDR(pt[1]) | PTE_P | PTE_W | PTE_U;
     pt[1]->entry[0] = PTE_ADDR(pt[2]) | PTE_P | PTE_W | PTE_U;
@@ -166,7 +191,6 @@ x86_64_pagetable* copy_pagetable(x86_64_pagetable* pagetable, int8_t owner) {
     r = virtual_memory_map(new_pagetable, PROC_START_ADDR, 0, MEMSIZE_VIRTUAL - PROC_START_ADDR, PTE_W | PTE_U,  0);  
     assert(r == 0);
 
-    // STEP 5
     // duplicate app physical pages that are mapped to pa and writable by app
     if (pagetable != kernel_pagetable) {
         for (va = PROC_START_ADDR; va < MEMSIZE_VIRTUAL; va += PAGESIZE) {
@@ -174,6 +198,11 @@ x86_64_pagetable* copy_pagetable(x86_64_pagetable* pagetable, int8_t owner) {
             if ((v.pn != -1) && (v.perm & PTE_P) && (v.perm & PTE_U)) {
 		if (v.perm & PTE_W) {
                     uintptr_t pa = (uintptr_t) page_allocator();
+		    if (!pa) {
+			free_pagetable(new_pagetable);
+			own = 0;
+			return NULL;
+		    }
                     if (pa) {
                         r = virtual_memory_map(new_pagetable, va, pa, PAGESIZE, v.perm, 0);
                         assert(r == 0);
@@ -204,17 +233,10 @@ void process_setup(pid_t pid, int program_number) {
     current = &processes[pid];
     x86_64_pagetable* process_pagetable = copy_pagetable(kernel_pagetable, pid);
     processes[pid].p_pagetable = process_pagetable;
-    //virtual_memory_map(process_pagetable, PROC_START_ADDR, PROC_START_ADDR, MEMSIZE_PHYSICAL - PROC_START_ADDR, PTE_P, 0);
     
     int r = program_load(&processes[pid], program_number, NULL);
     assert(r >= 0);
-    /*processes[pid].p_registers.reg_rsp = PROC_START_ADDR + PROC_SIZE * pid;
-    uintptr_t stack_page = processes[pid].p_registers.reg_rsp - PAGESIZE;
-    assign_physical_page(stack_page, pid);
-    virtual_memory_map(processes[pid].p_pagetable, stack_page, stack_page,
-                       PAGESIZE, PTE_P | PTE_W | PTE_U, NULL);
-    processes[pid].p_state = P_RUNNABLE;*/
-//step 4!
+
     processes[pid].p_registers.reg_rsp = MEMSIZE_VIRTUAL;
     uintptr_t stack_va = processes[pid].p_registers.reg_rsp - PAGESIZE;
     uintptr_t stack_pa = find_free_pp();    
@@ -242,6 +264,8 @@ pid_t sys_fork(){
 
     //child
     x86_64_pagetable* new_table = copy_pagetable(current->p_pagetable, pid);
+    if (!new_table)
+	return -1;
     processes[pid].p_registers = current->p_registers;
     processes[pid].p_registers.reg_rax = 0;
     processes[pid].p_state = P_RUNNABLE;
@@ -253,6 +277,57 @@ pid_t sys_fork(){
     return pid;
 }
 
+// free_pa(pa)
+//    for when sys_exit is called
+//    reduces refcount by 1
+//    if the last process, frees owner  
+void free_pa (uintptr_t pa) {
+    physical_pageinfo *pinfo = &pageinfo[PAGENUMBER(pa)];
+    if (pinfo->refcount > 0) 
+        pinfo->refcount--;
+    if (pinfo->refcount == 0) 
+        pinfo->owner = 0;
+}
+
+// free_pagetable(pagetable)
+//    for when sys_exit is called
+//    free all the physical pages used by the pagetable
+void free_pagetable(x86_64_pagetable* pagetable) {
+
+    uintptr_t va;
+    size_t sz;
+    int r;
+
+    if (pagetable == kernel_pagetable) {
+	return;
+    }
+    else {
+        for (va = PROC_START_ADDR; va < MEMSIZE_VIRTUAL; va += PAGESIZE) {
+            vamapping v = virtual_memory_lookup(pagetable, va);
+            if ((v.pn != -1) && (v.perm & PTE_P) && (v.perm & PTE_U)) {
+		free_pa(v.pa);
+            }
+        }
+    }
+
+    x86_64_pagetable* pt[6];
+    pt[0] = pagetable;
+    pt[1] = (x86_64_pagetable *) PTE_ADDR(pt[0]->entry[0]);
+    pt[2] = (x86_64_pagetable *) PTE_ADDR(pt[1]->entry[0]);
+    pt[3] = (x86_64_pagetable *) PTE_ADDR(pt[2]->entry[0]);
+    pt[4] = (x86_64_pagetable *) PTE_ADDR(pt[2]->entry[1]);
+    pt[5] = (x86_64_pagetable *) PTE_ADDR(pt[2]->entry[2]);
+    for (int i=0; i<6; i++)
+        free_pa((uintptr_t) pt[i]);
+}
+
+
+// sys_exit()
+//    corresponding exception is called
+void sys_exit() {
+    free_pagetable(current->p_pagetable);
+    current->p_state = P_FREE;
+}
 
 // assign_physical_page(addr, owner)
 //    Allocates the page with physical address `addr` to the given owner.
@@ -326,13 +401,11 @@ void exception(x86_64_registers* reg) {
 	uintptr_t pa = find_free_pp();
 	if (pa == 0) {
 	    current -> p_registers.reg_rax = -1;
-	    log_printf("int sys page alloc reg rax is %d\n", current -> p_registers.reg_rax);
+	    //log_printf("int sys page alloc reg rax is %d\n", current -> p_registers.reg_rax);
 	    console_printf(CPOS(24, 0), 0x0C00, "Out of physical memory!");
             break;
 	}
         int r = assign_physical_page(pa, current->p_pid);
-	//pageinfo[PAGENUMBER(pa)].owner = current->p_pid;
-        //pageinfo[PAGENUMBER(addr)].refcount ++;
         if (r >= 0) {
             virtual_memory_map(current->p_pagetable, addr, pa,
                                PAGESIZE, PTE_P | PTE_W | PTE_U, page_allocator);
@@ -367,6 +440,11 @@ void exception(x86_64_registers* reg) {
 
     case INT_SYS_FORK: {
 	sys_fork();
+	break;
+    }
+
+    case INT_SYS_EXIT: {
+	sys_exit();
 	break;
     }
 
