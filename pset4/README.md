@@ -7,7 +7,7 @@ anonymously, so put all personally identifying information in `AUTHORS.md`.
 Grading notes (if any)
 ----------------------
 
-DON'T GRADE THIS YET I'M TAKING LATE HOURS
+I forgot to commit and push Step 4, but the working Step 5 and on should show that it works.
 
 Extra credit attempted (if any)
 -------------------------------
