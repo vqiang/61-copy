@@ -13,6 +13,11 @@ struct command {
     int argc;      // number of arguments
     char** argv;   // arguments, terminated by NULL
     pid_t pid;     // process ID running this command, -1 if none
+
+    int type;      // terminator of a command
+    command * next; // linked list
+    int pipe_in[2], pipe_out[2]; // to support pipes
+    char *redir[3]; // redirection
 };
 
 
@@ -20,10 +25,10 @@ struct command {
 //    Allocate and return a new command structure.
 
 static command* command_alloc(void) {
-    command* c = (command*) malloc(sizeof(command));
-    c->argc = 0;
-    c->argv = NULL;
+    command* c = (command*)malloc(sizeof(command));
+    memset(c, 0, sizeof(command));
     c->pid = -1;
+    c->type = TOKEN_OTHER;
     return c;
 }
 
@@ -32,10 +37,14 @@ static command* command_alloc(void) {
 //    Free command structure `c`, including all its words.
 
 static void command_free(command* c) {
-    for (int i = 0; i != c->argc; ++i) {
+    int i;
+    for (i = 0; i != c->argc; ++i) {
         free(c->argv[i]);
     }
     free(c->argv);
+    for (i = 0; i < 3; i++)
+        if (c->redir[i]) 
+            free(c->redir[i]);
     free(c);
 }
 
@@ -45,7 +54,7 @@ static void command_free(command* c) {
 //    and augments `c->argv`.
 
 static void command_append_arg(command* c, char* word) {
-    c->argv = (char**) realloc(c->argv, sizeof(char*) * (c->argc + 2));
+    c->argv = (char**)realloc(c->argv, sizeof(char*) * (c->argc + 2));
     c->argv[c->argc] = word;
     c->argv[c->argc + 1] = NULL;
     ++c->argc;
@@ -53,6 +62,41 @@ static void command_append_arg(command* c, char* word) {
 
 
 // COMMAND EVALUATION
+
+// special_command()
+//   for cd, return 0 if successful
+pid_t special_command(command* c) {
+    static const char* badfile_msg = "No such file or directory ";
+    assert(c);
+    assert(c->argc >= 1);
+    int r = 0, fd;
+
+    if (strcmp(c->argv[0], "cd") == 0) {
+        r = chdir((c->argc >= 2) ? c->argv[1] : "");
+        if (r) {
+            if (c->redir[2]) {
+                fd = open(c->redir[2], O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                if (fd == -1) {
+                    fprintf(stderr, "cd: %s: %s", c->argv[1], badfile_msg);
+                }
+                else {
+                    r = write(fd, badfile_msg, sizeof(badfile_msg));
+                    close(fd);
+                }
+            }
+            else
+                fprintf(stderr, "%s", badfile_msg);
+            return -1;
+        }
+        return 0;
+    }
+    else { // unsupported
+        fprintf(stderr, "unsupported special command %s\n", c->argv[0]);
+        return -1;
+    }
+    return 0;
+}
+
 
 // start_command(c, pgid)
 //    Start the single command indicated by `c`. Sets `c->pid` to the child
@@ -69,12 +113,103 @@ static void command_append_arg(command* c, char* word) {
 //       this will require TWO calls to `setpgid`.
 
 pid_t start_command(command* c, pid_t pgid) {
-    (void) pgid;
-    // Your code here!
-    fprintf(stderr, "start_command not done yet\n");
+    int i;
+    int fd;
+
+    if (strcmp(c->argv[0], "cd") == 0) { // special command
+        return special_command(c);
+    }
+
+    c->pid = fork();
+    assert(c->pid >= 0);
+    if (c->pid == 0) { // child
+        if (pgid)
+            setpgid(getpid(), pgid);
+        else
+            setpgid(0, 0);
+
+        if (c->pipe_in[0]) {
+            dup2(c->pipe_in[0], 0); // in_bound pipe
+            close(c->pipe_in[0]);
+            close(c->pipe_in[1]);
+        }
+        if (c->redir[0]) { 
+            fd = open(c->redir[0], O_RDONLY);
+            if (fd == -1) {
+                fprintf(stderr, "No such file or directory ");
+                _exit(1);
+            }
+            dup2(fd, 0);
+            close(fd);
+        }
+
+        if (c->pipe_out[1]) {
+            dup2(c->pipe_out[1], 1); // out_bound pipe
+            close(c->pipe_out[0]);
+            close(c->pipe_out[1]);
+        }
+        if (c->redir[1]) {
+            fd = open(c->redir[1], O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd == -1) {
+                fprintf(stderr, "No such file or directory ");
+                _exit(1);
+            }
+            dup2(fd, 1);
+            close(fd);
+        }
+
+        if (c->redir[2]) {
+            fd = open(c->redir[2], O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd == -1) {
+                fprintf(stderr, "No such file or directory ");
+                _exit(1);
+            }
+            dup2(fd, 2);
+            close(fd);
+        }
+        i = execvp(c->argv[0], c->argv);
+        _exit(i);
+    }
+    if (pgid)
+        setpgid(c->pid, pgid);
+    else
+        setpgid(c->pid, c->pid);
+
     return c->pid;
 }
 
+
+// start_pipe()
+//   handle pipelines. Start all processes in the pipeline in parallel. 
+//   The status of a pipeline is the status of its LAST command.
+pid_t start_pipe(command* c, pid_t pgid) {
+    command* cp = c;
+    assert(cp);
+    assert(cp->argc > 0);
+    int i, r;
+
+    while (cp->type == TOKEN_PIPE) {
+        assert(cp->next); // something has to follow pipe 
+
+        r = pipe(cp->pipe_out);
+        if (r == -1) {
+            perror("pipe failed\n");
+            exit(1);
+        }
+        cp->pid = start_command(cp, pgid);
+        for (i = 0; i<2; i++) {
+            if (cp->pipe_in[i]) close(cp->pipe_in[i]);
+            cp->next->pipe_in[i] = cp->pipe_out[i];
+        }
+        cp = cp->next;
+    }
+    assert(cp); // last one
+    cp->pid = start_command(cp, pgid);
+    for (i = 0; i<2; i++)
+        close(cp->pipe_in[i]);
+
+    return cp->pid; // wait on last one for status
+}
 
 // run_list(c)
 //    Run the command list starting at `c`.
@@ -94,31 +229,160 @@ pid_t start_command(command* c, pid_t pgid) {
 //       - Call `claim_foreground(pgid)` before waiting for the pipeline.
 //       - Call `claim_foreground(0)` once the pipeline is complete.
 
-void run_list(command* c) {
-    start_command(c, 0);
-    fprintf(stderr, "run_command not done yet\n");
+int run_list1(command* c) {
+
+    pid_t pgid, pid, w;
+    int status, r = 0;
+    command *cp = c;
+    int skip_cond = 0; // skil next conditional
+
+    pgid = getpid();
+
+    while (cp) {
+        if (cp->argc) {
+            if (!skip_cond) {
+                switch (cp->type) {
+                case TOKEN_NORMAL: // normal must be the last one, use any logic
+                case TOKEN_AND:
+                case TOKEN_OR:
+                    pid = start_command(cp, pgid);
+                    break;
+
+                case TOKEN_PIPE:
+                    pid = start_pipe(cp, pgid);
+                    while (cp->type == TOKEN_PIPE)
+                        cp = cp->next;
+                    break;
+
+                default:
+                    fprintf(stderr, "run_list1(), unhandled condition type=%d\n", cp->type);
+                    exit(1);
+                } 
+
+                r = pid;
+                if (pid > 0) {
+                    claim_foreground(pgid);
+                    do {
+                        w = waitpid(-1, &status, WUNTRACED | WCONTINUED);
+                        if (w == -1) {
+                            perror("waitpid");
+                            exit(EXIT_FAILURE);
+                        }
+                    } while ((!WIFEXITED(status) && !WIFSIGNALED(status)) || w != pid);
+                    claim_foreground(0);
+                    if (WIFEXITED(status))
+                        r = WEXITSTATUS(status);
+                }
+            }
+
+            skip_cond = ((cp->type == TOKEN_AND && r != 0) || (cp->type == TOKEN_OR && r == 0));
+
+        }
+
+        cp = cp->next;
+    }
+    return r;
 }
 
+pid_t run_list(command* c, int list_type) {
+    pid_t pid;
+    int r;
+
+    if (list_type == TOKEN_BACKGROUND) { // fork a child process in the background
+        c->pid = fork();
+        assert(c->pid >= 0);
+        if (c->pid == 0) { // background child process
+            r = run_list1(c);
+            _exit(r);
+        }
+        pid = c->pid;
+    }
+    else { // run in parent process
+        run_list1(c);
+        pid = getpid();
+    }
+    return pid;
+}
 
 // eval_line(c)
 //    Parse the command list in `s` and run it via `run_list`.
 
+#define TOKEN_END 999
 void eval_line(const char* s) {
     int type;
-    char* token;
-    // Your code here!
+    char* token, *filename;
 
     // build the command
-    command* c = command_alloc();
-    while ((s = parse_shell_token(s, &type, &token)) != NULL) {
-        command_append_arg(c, token);
-    }
+    command* root = command_alloc();
+    command* c = root;
+    int list_type, run_command = 0;
+    do {
+        s = parse_shell_token(s, &type, &token);
+        c->type = type;
+        if (s == 0) // default to sequence for last one
+            type = TOKEN_END;
 
-    // execute it
-    if (c->argc) {
-        run_list(c);
-    }
-    command_free(c);
+        switch (type) {
+            // append to exiting command
+        case TOKEN_NORMAL:
+            command_append_arg(c, token);
+            break;
+
+        case TOKEN_REDIRECTION:
+            s = parse_shell_token(s, &type, &filename); // must be followed by a filename
+            assert(s);
+            assert(type == TOKEN_NORMAL);
+            if (strcmp(token, "<") == 0)
+                c->redir[0] = filename;
+            else if (strcmp(token, ">") == 0)
+                c->redir[1] = filename;
+            else 
+                c->redir[2] = filename;
+            break;
+
+            // start a new command
+        case TOKEN_AND:
+        case TOKEN_OR:
+        case TOKEN_PIPE:
+            c->next = command_alloc();
+            c = c->next;
+            break;
+
+            // list terminator/separator
+        case TOKEN_BACKGROUND:
+        case TOKEN_SEQUENCE:
+        case TOKEN_END:
+            list_type = type;
+            c->type = TOKEN_NORMAL; // convert terminator to normal
+            run_command = 1;
+            break;
+
+        default:
+            fprintf(stderr, "eval_line() unsupported type=%d\n", type);
+            exit(1);
+        }
+
+        // execute it
+        if (run_command) {
+            c = root;
+            if (c->argc) {
+                run_list(c, list_type);
+            }
+
+            while (c) {
+                root = c->next;
+                command_free(c);
+                c = root;
+            }
+
+            root = command_alloc();
+            c = root;
+            assert(c);
+            run_command = 0;
+        }
+    } while (s);
+    if (c)
+        command_free(c);
 }
 
 
@@ -165,7 +429,8 @@ int main(int argc, char* argv[]) {
                 // ignore EINTR errors
                 clearerr(command_file);
                 buf[bufpos] = 0;
-            } else {
+            }
+            else {
                 if (ferror(command_file)) {
                     perror("sh61");
                 }
@@ -182,7 +447,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Handle zombie processes and/or interrupt requests
-        // Your code here!
+        waitpid(-1, NULL, WNOHANG);
     }
 
     return 0;
