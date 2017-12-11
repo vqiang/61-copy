@@ -13,10 +13,23 @@
 #include <pthread.h>
 #include "serverinfo.h"
 
+#define MAX_CONN 35
+
 static const char* pong_host = PONG_HOST;
 static const char* pong_port = PONG_PORT;
 static const char* pong_user = PONG_USER;
 static struct addrinfo* pong_addr;
+
+
+// printf debug message/*
+#include <stdarg.h>
+void log_printf(char* format, ...) {
+    //return;
+    va_list argList;
+    va_start(argList, format);
+    vprintf(format, argList);
+    va_end(argList);
+}
 
 
 // TIME HELPERS
@@ -62,7 +75,11 @@ struct http_connection {
     int eof;                // 1 iff connection EOF has been reached
 
     char buf[BUFSIZ];       // Response buffer
+    char reserve[1000];
     size_t len;             // Length of response buffer
+    size_t total_len;       // total length of response buffer
+
+    http_connection *next; // for linked list
 };
 
 // helper functions
@@ -100,6 +117,9 @@ http_connection* http_connect(const struct addrinfo* ai) {
     conn->fd = fd;
     conn->cstate = cstate_idle;
     conn->eof = 0;
+    conn->next = 0;
+    conn->total_len = 0;
+    conn->len = 0;
     return conn;
 }
 
@@ -170,7 +190,7 @@ void http_receive_response_headers(http_connection* conn) {
     // read & parse data until `http_process_response_headers`
     // tells us to stop
     while (http_process_response_headers(conn)) {
-        ssize_t nr = read(conn->fd, &conn->buf[conn->len], BUFSIZ);
+        ssize_t nr = read(conn->fd, &conn->buf[conn->len], BUFSIZ - conn->len - 1);
         if (nr == 0) {
             conn->eof = 1;
         } else if (nr == -1 && errno != EINTR && errno != EAGAIN) {
@@ -200,14 +220,18 @@ void http_receive_response_headers(http_connection* conn) {
 void http_receive_response_body(http_connection* conn) {
     assert(conn->cstate < 0 || conn->cstate == cstate_body);
     if (conn->cstate < 0) {
+        assert(conn->cstate != cstate_broken);
+	printf("%i\n",conn->cstate);
         return;
     }
     // NB: conn->buf might contain some body data already!
 
     // read response body (http_check_response_body tells us when to stop)
+    printf("in front of while loop\n");
     while (http_check_response_body(conn)) {
-        ssize_t nr = read(conn->fd, &conn->buf[conn->len], BUFSIZ);
-        if (nr == 0) {
+        ssize_t nr = read(conn->fd, &conn->buf[conn->len], BUFSIZ - conn->len - 1);
+
+        if (nr == 0){
             conn->eof = 1;
         } else if (nr == -1 && errno != EINTR && errno != EAGAIN) {
             perror("read");
@@ -216,6 +240,7 @@ void http_receive_response_body(http_connection* conn) {
             conn->len += nr;
             conn->buf[conn->len] = 0;  // null-terminate
         }
+	printf("receive ML=%zu, TL=%zu, Len=%zu, nr=%zu \n", conn->content_length, conn->total_len, conn->len, nr);
     }
 }
 
@@ -242,11 +267,60 @@ typedef struct pong_args {
     int y;
 } pong_args;
 
-volatile int move_done;
+//////////////////////////////////////////////////////////////
+int n_busy = 0; // keeps track of number of busy threads
+pthread_mutex_t mutex;
+pthread_cond_t nonfull; // not full
+http_connection *conn_free = 0; // keeps track of freed connections for reuse
+
+// congestion condition
+pthread_mutex_t mutex_cong;
+pthread_cond_t cond_cong;
+int congested = 0;
+
+// sync between main/thread, main must hold off new thread until header is completed 
+pthread_mutex_t mutex_move; 
+pthread_cond_t cond_move; 
+int move_done = 0;
+
+void pong61_init() {
+    pthread_mutex_init(&mutex, NULL);
+    pthread_cond_init(&nonfull, NULL);
+
+    pthread_mutex_init(&mutex_cong, NULL);
+    pthread_cond_init(&cond_cong, NULL);
+
+    pthread_mutex_init(&mutex_move, NULL);
+    pthread_cond_init(&cond_move, NULL);
+}
+
+void pong61_free() {
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&nonfull);
+
+    for (http_connection *conn = conn_free; conn; conn = conn->next) 
+        http_close(conn);
+    conn_free = 0;
+
+    pthread_mutex_destroy(&mutex_move);
+    pthread_cond_destroy(&cond_move);
+    move_done = 0;
+}
+
+///////////////////////////////////////////////////////////////
+
 
 // pong_thread(threadarg)
 //    Connect to the server at the position indicated by `threadarg`
 //    (which is a pointer to a `pong_args` structure).
+// phase 1 loss: server offline, retry with exponential back off
+// phase 2 delay: main() start new thread after request_body, without waiting for delayed request_body
+//         assume phase 1 won't affect request_body
+// phase 3 utilization and synchronization: reuse connections
+// phase 4 congenstion: TODO
+// phase 5 evil: TODO
+// other: added MAX_CONN to limit concurrent active thread pool
+
 void* pong_thread(void* threadarg) {
     pthread_detach(pthread_self());
 
@@ -257,31 +331,112 @@ void* pong_thread(void* threadarg) {
     snprintf(url, sizeof(url), "move?x=%d&y=%d&style=on",
              pa.x, pa.y);
 
-    http_connection* conn = http_connect(pong_addr);
-    http_send_request(conn, url);
-    http_receive_response_headers(conn);
-    if (conn->status_code != 200) {
-        fprintf(stderr, "%.3f sec: warning: %d,%d: "
+    log_printf("pong_thread(%d, %d) enter\n", pa.x, pa.y);
+    http_connection* conn = 0;
+
+    pthread_mutex_lock(&mutex);
+    ++n_busy;
+    if (conn_free) { // reuse if possible
+        conn = conn_free;
+        conn_free = conn->next;
+        log_printf("pong_thread(%d, %d) reuse conn [%p]\n", pa.x, pa.y, conn);
+    }
+    pthread_mutex_unlock(&mutex);
+
+    pthread_mutex_lock(&mutex_move);
+    int k = 10, broken_retry = 0;
+    while (1) {
+        if (broken_retry) { // broken connection, retry 
+            if (conn) http_close(conn);
+            k *= 2;
+            log_printf("pong_thread(%d, %d) phase 1 loss, retry delay k=%d\n", pa.x, pa.y, k);
+            //http_close(conn);
+            conn = 0;
+            if (k > 128000)
+                k = 128000;
+            usleep(k * 1000);
+        }
+
+        if (!conn) {
+            conn = http_connect(pong_addr);
+            log_printf("pong_thread(%d, %d) new conn [%p]\n", pa.x, pa.y, conn);
+        }
+
+        pthread_mutex_lock(&mutex_cong); // check for congession before sending new request
+        while (congested)
+            pthread_cond_wait(&cond_cong, &mutex_cong);
+        pthread_mutex_unlock(&mutex_cong);
+        http_send_request(conn, url);
+        log_printf("pong_thread(%d, %d) send_response\n", pa.x, pa.y);
+
+        http_receive_response_headers(conn);
+        if (conn->cstate == cstate_broken && conn->status_code == -1) { // check if broken connection
+            broken_retry = 1;
+            continue;
+        }
+
+        if (conn->status_code != 200) {
+            fprintf(stderr, "%.3f sec: warning: %d,%d: "
                 "server returned status %d (expected 200)\n",
                 elapsed(), pa.x, pa.y, conn->status_code);
+        }
+        log_printf("pong_thread(%d, %d) response_header\n", pa.x, pa.y);
+        break; // exit while loop
     }
+    move_done = 1;
+    pthread_cond_signal(&cond_move);
+    pthread_mutex_unlock(&mutex_move);
 
     http_receive_response_body(conn);
+    // for now, assume connection won't broke during response_body()
+    //assert(conn->cstate != cstate_broken); 
+    assert(conn->status_code != -1);
     double result = strtod(conn->buf, NULL);
     if (result < 0) {
         fprintf(stderr, "%.3f sec: server returned error: %s\n",
-                elapsed(), http_truncate_response(conn));
+            elapsed(), http_truncate_response(conn));
         exit(1);
     }
-
-    http_close(conn);
+    if (result > 0) {
+        pthread_mutex_lock(&mutex_cong); // check for congestion 
+	congested = 1;
+        log_printf("pong_thread(%d, %d) stop start\n", pa.x, pa.y);
+	useconds_t wait = result * 1000;
+	usleep(wait);
+	congested = 0;
+	pthread_cond_broadcast(&cond_cong);
+        pthread_mutex_unlock(&mutex_cong);
+        fprintf(stderr, "[%g] sec: server returned error: %s\n",
+            result, http_truncate_response(conn));
+	log_printf("pong_thread(%d, %d) stop release\n", pa.x, pa.y);
+	//exit(1);
+    }
+    log_printf("pong_thread(%d, %d) finish response_body\n", pa.x, pa.y);
+    
+    //http_close(conn);
 
     // signal the main thread to continue
     // XXX The handout code uses polling and unsafe concurrent access to a
     // global variable. For full credit, replace this with pthread
     // synchronization objects (in Phase 3).
-    move_done = 1;
+    pthread_mutex_lock(&mutex);
+    if (conn->cstate == cstate_idle) { // can reuse
+        conn->eof = 0;
+	conn->len = 0;
+	conn->total_len = 0;
+        conn->next = conn_free;
+        conn_free = conn;
+        log_printf("pong_thread(%d, %d) phase 3 conn reuse [%p]\n", pa.x, pa.y, conn);
+    }
+    else 
+        http_close(conn);
+    --n_busy;
+    if (n_busy < MAX_CONN)
+        pthread_cond_signal(&nonfull);
+    pthread_mutex_unlock(&mutex);
+
     // and exit!
+    log_printf("pong_thread(%d, %d) exit\n", pa.x, pa.y);
     pthread_exit(NULL);
 }
 
@@ -367,8 +522,14 @@ int main(int argc, char** argv) {
 
     // play game
     int x = 0, y = 0, dx = 1, dy = 1;
+    pong61_init();
     while (1) {
         // create a new thread to handle the next position
+        //pthread_mutex_lock(&mutex);
+        pthread_mutex_lock(&mutex);
+        while (n_busy >= MAX_CONN) // limit total number of active threads/conn
+            pthread_cond_wait(&nonfull, &mutex);
+        pthread_mutex_unlock(&mutex);
         pong_args pa;
         pa.x = x;
         pa.y = y;
@@ -384,10 +545,15 @@ int main(int argc, char** argv) {
         // XXX The handout code uses polling and unsafe concurrent access to a
         // global variable. For full credit, replace this with pthread
         // synchronization objects.
-        while (!move_done) {
-            usleep(20000); // *sort of* blocking...
-        }
+        pthread_mutex_lock(&mutex_move);
+        while (!move_done)
+            pthread_cond_wait(&cond_move, &mutex_move);
+        pthread_mutex_unlock(&mutex_move);
         move_done = 0;
+        //while (!move_done) {
+        //    usleep(20000); // *sort of* blocking...
+        //}
+        //move_done = 0;
 
         // update position
         x += dx;
@@ -404,6 +570,7 @@ int main(int argc, char** argv) {
         // wait 0.1sec
         usleep(delay);
     }
+    pong61_free();
 }
 
 
@@ -433,6 +600,16 @@ static int http_process_response_headers(http_connection* conn) {
                 conn->content_length = strtoul(conn->buf + 16, NULL, 0);
                 conn->has_content_length = 1;
             }
+            //else if (conn->buf[0] == "+") {
+            //    conn->cong_wait = atoi(conn->buf + 1);
+            //}
+            else {
+		if (strncasecmp(conn->buf, "Content-Type: ", 14) 
+			&& strncasecmp(conn->buf, "Date:", 5)
+			&& strncasecmp(conn->buf, "Connection:", 11)) 
+		    fprintf(stderr,"response_header() ignored response [%s]\n", conn->buf); 
+	    }
+
             // We just consumed a header line (i+2) chars long.
             // Move the rest of the data down, including terminating null.
             memmove(conn->buf, conn->buf + i + 2, conn->len - (i + 2) + 1);
@@ -454,9 +631,11 @@ static int http_process_response_headers(http_connection* conn) {
 //    Returns 1 if more response data should be read into `conn->buf`,
 //    0 if the connection is broken or the response is complete.
 static int http_check_response_body(http_connection* conn) {
+    conn->total_len += conn->len;
+    conn->len = 0;
     if (conn->cstate == cstate_body
         && (conn->has_content_length || conn->eof)
-        && conn->len >= conn->content_length) {
+        && conn->total_len >= conn->content_length) {
         conn->cstate = cstate_idle;
     }
     if (conn->eof && conn->cstate == cstate_idle) {
@@ -464,5 +643,7 @@ static int http_check_response_body(http_connection* conn) {
     } else if (conn->eof) {
         conn->cstate = cstate_broken;
     }
+    //memmove(conn->buf, conn->buf + i + 2, conn->len - (i + 2) + 1);
+    //conn->len -= i + 2;    
     return conn->cstate == cstate_body;
 }

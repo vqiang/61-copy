@@ -5,7 +5,7 @@ Students
 --------
 (List your team members and describe in a couple words how you divided the
 work.)
-
+Vivian Qiang
 
 Collaborators
 -------------
@@ -16,3 +16,4 @@ the class.)
 Citations
 ---------
 (List any other sources consulted.)
+tutorials point, stackexchange, cs61 lecture/section notes, piazza, lecture/section videos
