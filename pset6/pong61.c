@@ -24,7 +24,7 @@ static struct addrinfo* pong_addr;
 // printf debug message/*
 #include <stdarg.h>
 void log_printf(char* format, ...) {
-    //return;
+    return;
     va_list argList;
     va_start(argList, format);
     vprintf(format, argList);
@@ -219,13 +219,14 @@ void http_receive_response_headers(http_connection* conn) {
 //    null-terminated.
 void http_receive_response_body(http_connection* conn) {
     assert(conn->cstate < 0 || conn->cstate == cstate_body);
+
     if (conn->cstate < 0) {
-        assert(conn->cstate != cstate_broken);
+        //assert(conn->cstate != cstate_broken);
 	printf("%i\n",conn->cstate);
         return;
     }
     // NB: conn->buf might contain some body data already!
-
+    conn->total_len = conn->len;
     // read response body (http_check_response_body tells us when to stop)
     printf("in front of while loop\n");
     while (http_check_response_body(conn)) {
@@ -237,6 +238,7 @@ void http_receive_response_body(http_connection* conn) {
             perror("read");
             exit(1);
         } else if (nr != -1) {
+	    conn->total_len += nr;
             conn->len += nr;
             conn->buf[conn->len] = 0;  // null-terminate
         }
@@ -631,8 +633,41 @@ static int http_process_response_headers(http_connection* conn) {
 //    Returns 1 if more response data should be read into `conn->buf`,
 //    0 if the connection is broken or the response is complete.
 static int http_check_response_body(http_connection* conn) {
-    conn->total_len += conn->len;
-    conn->len = 0;
+    /*conn->total_len += conn->len;
+    conn->len = 0;*/
+    size_t i = 0;
+    printf("len %i\n", conn->len);
+    while ((conn->cstate == cstate_waiting || conn->cstate == cstate_body)
+           && i + 2 <= conn->len) {
+	printf("buffer[%i] = [%c]\n", i, conn->buf[i]);
+        if (conn->buf[i] == '\r' && conn->buf[i+1] == '\n') {
+            conn->buf[i] = 0;
+	    printf("buffer is [%s]\n", conn->buf);
+            double result = strtod(conn->buf, NULL);
+            if (result > 0) { // check for congestion
+		pthread_mutex_lock(&mutex_cong); // check for congestion 
+		congested = 1;
+		log_printf("stop start\n");
+		useconds_t wait = result * 1000;
+		usleep(wait);
+		congested = 0;
+		pthread_cond_broadcast(&cond_cong);
+		pthread_mutex_unlock(&mutex_cong);
+		fprintf(stderr, "[%g] sec: server returned error: %s\n",
+		    result, conn->buf);
+		log_printf("stop release\n");
+		//exit(1);
+	    }
+            // We just consumed a body line (i+2) chars long.
+            // Move the rest of the data down, including terminating null.
+            memmove(conn->buf, conn->buf + i + 2, conn->len - (i + 2) + 1);
+            conn->len -= i + 2;
+	    //conn->total_len += i + 2;
+            i = 0;
+        } else {
+            ++i;
+        }
+    }
     if (conn->cstate == cstate_body
         && (conn->has_content_length || conn->eof)
         && conn->total_len >= conn->content_length) {
